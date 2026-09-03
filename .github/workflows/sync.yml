@@ -15,26 +15,49 @@ jobs:
     if: ${{ github.event.repository.fork }}
 
     steps:
-      # Step 1: run a standard checkout action
       - name: Checkout target repo
         uses: actions/checkout@v6
-
-      # Step 2: run the sync action
-      - name: Sync upstream changes
-        id: sync
-        uses: aormsby/fork-sync-with-upstream-action@v3.4.3
         with:
-          upstream_sync_repo: cmliu/edgetunnel
-          upstream_sync_branch: main
-          target_sync_branch: main
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }} # automatically generated, no need to set
+          fetch-depth: 0
+          ref: main
 
-          # Set test_mode true to run tests instead of the true action!!
-          test_mode: false
-
-      - name: Sync check
-        if: failure()
+      - name: Sync upstream changes
+        shell: bash
         run: |
-          echo "[Error] 由于上游仓库的 workflow 文件变更，导致 GitHub 自动暂停了本次自动更新，你需要手动 Sync Fork 一次，详细教程请查看项目README.md "
-          echo "[Error] Due to a change in the workflow file of the upstream repository, GitHub has automatically suspended the scheduled automatic update. You need to manually sync your fork. Please refer to the project README.md for instructions. "
-          exit 1
+          set -euo pipefail
+          git config user.name "GH Action - Upstream Sync"
+          git config user.email "action@github.com"
+
+          git remote add upstream https://github.com/cmliu/edgetunnel.git
+          git fetch --no-tags upstream main
+
+          # This workflow belongs to the fork. Do not attempt to push an
+          # upstream change to it: GITHUB_TOKEN cannot update workflow files.
+          if git diff --quiet HEAD upstream/main -- . ':(exclude).github/workflows/sync.yml'; then
+            echo "No upstream changes outside .github/workflows/sync.yml."
+            exit 0
+          fi
+
+          if ! git merge --no-commit --no-ff upstream/main; then
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            if [ -n "$conflicts" ] && [ "$conflicts" != ".github/workflows/sync.yml" ]; then
+              git merge --abort
+              echo "[Error] Merge conflict detected outside .github/workflows/sync.yml."
+              echo "[Error] Merge conflict detected outside the fork-local sync workflow."
+              exit 1
+            fi
+            git checkout --ours -- .github/workflows/sync.yml
+            git add .github/workflows/sync.yml
+          fi
+
+          # Restore the fork-local workflow before creating the merge commit.
+          git restore --source=HEAD --staged --worktree -- .github/workflows/sync.yml
+
+          if git diff --cached --quiet; then
+            git merge --abort || true
+            echo "No syncable upstream changes; kept .github/workflows/sync.yml."
+            exit 0
+          fi
+
+          git commit -m "Sync upstream/main"
+          git push origin main
